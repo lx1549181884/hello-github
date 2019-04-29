@@ -3,19 +3,21 @@ package com.example.linxinggl.hey;
 import android.app.Activity;
 import android.app.Application;
 import android.app.Dialog;
+import android.app.Fragment;
 import android.content.Context;
 import android.graphics.Color;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.LayerDrawable;
 import android.graphics.drawable.StateListDrawable;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.AbsListView;
 import android.widget.Button;
 import android.widget.ImageView;
-import android.widget.ListView;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -28,12 +30,13 @@ import java.util.Arrays;
  * 效果：可以使用方向键控制焦点在 View 上移动，并且获取焦点的 View 会加亮边框显示
  * <p>
  * 使用方法：
- * 在 Application.onCreate() 里调用 {@link DirectionKeyUtil#init(Application, boolean)}
- * 若 Dialog 要达到效果，需要在 Dialog.onCreate() 里调用{@link DirectionKeyUtil#initDialog(Dialog, boolean)}，因为Dialog不使用Activity的Window，无法对其监听（目前没找到方法监听）
+ * 自适应Activity ：在 Application.onCreate() 里调用 {@link DirectionKeyUtil#init(Application, boolean)}
+ * 自适应Fragment ：在 BaseFragment.onCreate() 里调用 {@link DirectionKeyUtil#initFragment(Fragment, boolean)}
+ * 自适应Diaglog ：在 BaseDialog.onCreate() 里调用 {@link DirectionKeyUtil#initDialog(Dialog, boolean)}
  */
 public class DirectionKeyUtil {
 
-    private static final boolean OPEN_LOG = true;
+    private static final boolean OPEN_LOG = false;
 
     public static void log(String str) {
         if (OPEN_LOG)
@@ -43,7 +46,7 @@ public class DirectionKeyUtil {
     private static Application.ActivityLifecycleCallbacks callback;
 
     /**
-     * 初始化app
+     * 初始化
      *
      * @param forceUseFrame true:强制使用默认的高亮框。 false:若有定义的focus图层，则使用自定义的
      */
@@ -55,18 +58,17 @@ public class DirectionKeyUtil {
             callback = new Application.ActivityLifecycleCallbacks() {
                 @Override
                 public void onActivityCreated(Activity activity, Bundle savedInstanceState) {
-                }
-
-                @Override
-                public void onActivityStarted(Activity activity) {
                     long t = System.currentTimeMillis();
                     DirectionKeyUtil.initView(activity.getWindow().getDecorView(), forceUseFrame);
                     DirectionKeyUtil.log("初始化 " + activity.getClass().getSimpleName() + "，耗时 " + (System.currentTimeMillis() - t));
                 }
 
                 @Override
-                public void onActivityResumed(Activity activity) {
+                public void onActivityStarted(Activity activity) {
+                }
 
+                @Override
+                public void onActivityResumed(Activity activity) {
                 }
 
                 @Override
@@ -94,6 +96,18 @@ public class DirectionKeyUtil {
     }
 
     /**
+     * 初始化Fragment
+     *
+     * @param forceUseFrame 强制使用默认的高亮框
+     */
+    public static synchronized void initFragment(Fragment fragment, boolean forceUseFrame) {
+        log("initDialog()");
+        if (fragment == null)
+            return;
+        initView(fragment.getView(), forceUseFrame);
+    }
+
+    /**
      * 初始化Dialog
      *
      * @param forceUseFrame 强制使用默认的高亮框
@@ -117,8 +131,8 @@ public class DirectionKeyUtil {
             addFocusStateToView(view, forceUseFrame); // 添加focused图层给View
             return;
         }
-        if (view instanceof ListView) { // ListView比较特殊，item获取焦点时，是selected状态
-            ((ListView) view).setOnHierarchyChangeListener(new ViewGroup.OnHierarchyChangeListener() {
+        if (view instanceof AbsListView) { // AbsListView比较特殊，item获取焦点时，是selected状态
+            ((AbsListView) view).setOnHierarchyChangeListener(new ViewGroup.OnHierarchyChangeListener() {
                 @Override
                 public void onChildViewAdded(View parent, View child) {
 //                    log("ListView---onChildViewAdded---" + parent + "---" + child);
@@ -179,11 +193,22 @@ public class DirectionKeyUtil {
      * @param setFocusable                      是否设置 setFocusable(true)
      */
     private static void addStateToView(View view, int targetState, boolean deleteOriginalTargetStateDrawable, boolean setFocusable) {
-        addStateToBg(view, targetState, deleteOriginalTargetStateDrawable); // 添加指定状态图层至背景
-        if (view instanceof ImageView) // 若是ImageView，还需添加至Image
-            addStateToImg((ImageView) view, targetState, deleteOriginalTargetStateDrawable);
         if (setFocusable)
             view.setFocusable(true);
+        if (deleteOriginalTargetStateDrawable)
+            deleteStateOfView(view, targetState);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) // 6.0以上版本，可以setForeground，但对Button无效
+            if (view instanceof Button)
+                addStateToBg(view, targetState, false);
+            else
+                view.setForeground(generateDrawable(view.getContext(), view.getForeground(), targetState, false));
+        else {
+            if (view instanceof ImageView) // 若是ImageView，则添加至Image
+                addStateToImg((ImageView) view, targetState, false);
+            else
+                addStateToBg(view, targetState, false);
+        }
     }
 
     private static void addStateToImg(ImageView imageView, int targetState, boolean deleteOriginalTargetStateDrawable) {
@@ -270,6 +295,59 @@ public class DirectionKeyUtil {
             return sld;
         }
         return originalDrawable;
+    }
+
+    /**
+     * 删除View的指定图层
+     */
+    private static void deleteStateOfView(View view, int state) {
+        view.setBackground(deleteState(view.getBackground(), state));
+        if (view instanceof ImageView) {
+            ImageView img = (ImageView) view;
+            img.setImageDrawable(deleteState(img.getDrawable(), state));
+        }
+    }
+
+    /**
+     * 删除指定图层
+     */
+    private static Drawable deleteState(Drawable drawable, int state) {
+        if (drawable instanceof StateListDrawable) {
+            StateListDrawable sld = (StateListDrawable) drawable;
+            try {
+                Class<? extends StateListDrawable> sldClass = sld.getClass();
+                int count = (int) sldClass.getMethod("getStateCount").invoke(sld);
+                Method mGetStateDrawable = sldClass.getMethod("getStateDrawable", int.class);
+                Method mGetStateSet = sldClass.getMethod("getStateSet", int.class);
+
+                ArrayList<int[]> stateSetList = new ArrayList();
+                ArrayList<Drawable> stateDrawableList = new ArrayList();
+
+//                log("删除前");
+                for (int i = 0; i < count; i++) {
+                    int[] stateSet = (int[]) mGetStateSet.invoke(sld, i);
+//                    log(Arrays.toString(stateSet));
+                    if (hasStateInSet(stateSet, state))
+                        continue;
+                    stateSetList.add(stateSet);
+                    stateDrawableList.add((Drawable) mGetStateDrawable.invoke(sld, i));
+                }
+
+//                log("删除后");
+                if (stateSetList.size() < count) {
+                    sld = new StateListDrawable();
+                    for (int i = 0; i < stateSetList.size(); i++) {
+//                        log(Arrays.toString(stateSetList.get(i)));
+                        sld.addState(stateSetList.get(i), stateDrawableList.get(i));
+                    }
+                    return sld;
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+                log(e.getMessage());
+            }
+        }
+        return drawable;
     }
 
     private static Drawable frame; // 边框
